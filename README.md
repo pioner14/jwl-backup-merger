@@ -66,10 +66,6 @@ python jwl_backup_merger.py ./backups/ --output-dir ./output/ -o backup.jwlibrar
 
 Этот проект лицензирован под [MIT License](./LICENSE).
 
-## ✨ Автор
-
-AI Assistant (на основе анализа и доработки исходного проекта)
-
 ---
 
 Если вы нашли этот инструмент полезным, пожалуйста, поставьте звезду ⭐ репозиторию!
