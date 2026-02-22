@@ -25,7 +25,7 @@
 ### Скачивание
 
 ```bash
-git clone https://github.com/yourusername/jwl-backup-merger.git
+git clone https://github.com/pioner14/jwl-backup-merger.git
 cd jwl-backup-merger
 ```
 
