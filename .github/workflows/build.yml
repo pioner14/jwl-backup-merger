@@ -1,0 +1,137 @@
+name: Build & Test
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.9", "3.10", "3.11", "3.12"]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest
+
+    - name: Run syntax check
+      run: |
+        python -m py_compile jwl_backup_merger.py
+
+    - name: Test --help
+      run: |
+        python jwl_backup_merger.py --help
+
+  build:
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.12"]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Build binary with PyInstaller
+      run: |
+        pyinstaller jwl_backup_merger.spec --clean
+
+    - name: Verify binary exists
+      run: |
+        ls -la dist/
+      shell: bash
+
+    - name: Upload artifact (Linux)
+      if: runner.os == 'Linux'
+      uses: actions/upload-artifact@v4
+      with:
+        name: jwl-backup-merger-linux
+        path: dist/jwl-backup-merger
+        retention-days: 30
+
+    - name: Upload artifact (Windows)
+      if: runner.os == 'Windows'
+      uses: actions/upload-artifact@v4
+      with:
+        name: jwl-backup-merger-windows
+        path: dist/jwl-backup-merger.exe
+        retention-days: 30
+
+    - name: Upload artifact (macOS)
+      if: runner.os == 'macOS'
+      uses: actions/upload-artifact@v4
+      with:
+        name: jwl-backup-merger-macos
+        path: dist/jwl-backup-merger
+        retention-days: 30
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Build binary for Linux
+      run: |
+        pyinstaller jwl_backup_merger.spec --clean
+
+    - name: Build binary for Windows
+      uses: JackMcKew/pyinstaller-action-windows@main
+      with:
+        spec: jwl_backup_merger.spec
+
+    - name: Build binary for macOS
+      run: |
+        pyinstaller jwl_backup_merger.spec --clean
+      env:
+        RUNNER_OS: macOS
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          dist/jwl-backup-merger
+          dist/jwl-backup-merger.exe
+          build/windows/dist/jwl-backup-merger/jwl-backup-merger.exe
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

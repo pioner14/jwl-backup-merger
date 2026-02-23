@@ -27,6 +27,7 @@ wheels/
 # PyInstaller
 *.manifest
 *.spec
+!jwl_backup_merger.spec
 
 # Installer logs
 pip-log.txt
