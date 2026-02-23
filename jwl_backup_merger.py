@@ -16,6 +16,7 @@ JW Library Backup Merger
 import argparse
 import hashlib
 import json
+import logging
 import os
 import shutil
 import sqlite3
@@ -24,17 +25,51 @@ import tempfile
 import zipfile
 from datetime import datetime
 from pathlib import Path
+from typing import Dict, FrozenSet, List, Optional, Set, Tuple
+
+# Try to import tqdm, use dummy class if not available
+try:
+    from tqdm import tqdm
+except ImportError:
+    class tqdm:
+        def __init__(self, iterable=None, desc=None, total=None, disable=False, leave=True, postfix=None):
+            self.iterable = iterable
+            self.desc = desc
+            self.total = total
+            self.disable = disable
+            self.leave = leave
+            self.postfix = postfix
+        def __iter__(self):
+            for item in self.iterable:
+                yield item
+        def update(self, n=1):
+            pass
+        def close(self):
+            pass
+        def set_postfix(self, **kwargs):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+
+# Настройка логирования
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# Добавляем null handler чтобы избежать warnings если логирование не настроено
+logger.addHandler(logging.NullHandler())
 
 # Whitelist допустимых имён таблиц для безопасности
-ALLOWED_TABLES = frozenset([
+ALLOWED_TABLES: FrozenSet[str] = frozenset([
     'Note', 'UserMark', 'Location', 'Tag', 'TagMap', 'Bookmark', 'BlockRange'
 ])
 
 # Порядок обработки таблиц (сначала родительские, потом дочерние)
-TABLE_ORDER = ['Location', 'UserMark', 'Tag', 'Note', 'TagMap', 'Bookmark', 'BlockRange']
+TABLE_ORDER: List[str] = ['Location', 'UserMark', 'Tag', 'Note', 'TagMap', 'Bookmark', 'BlockRange']
 
 # Первичные ключи для каждой таблицы
-PRIMARY_KEYS = {
+PRIMARY_KEYS: Dict[str, str] = {
     'Tag': 'TagId',
     'UserMark': 'UserMarkId',
     'Location': 'LocationId',
@@ -161,7 +196,13 @@ def validate_database_schema(db_path):
         return False, [], f"Ошибка при проверке схемы: {e}"
 
 
-def copy_unique_records(src_conn, dst_conn, table_name, seen_hashes, id_mapping=None):
+def copy_unique_records(
+    src_conn: sqlite3.Connection,
+    dst_conn: sqlite3.Connection,
+    table_name: str,
+    seen_hashes: Set[str],
+    id_mapping: Optional[Dict[str, Dict[int, int]]] = None
+) -> Set[str]:
     """Копирование уникальных записей с маппингом ID для связанных таблиц
 
     Args:
@@ -185,12 +226,12 @@ def copy_unique_records(src_conn, dst_conn, table_name, seen_hashes, id_mapping=
         src_cursor.execute(f'SELECT * FROM "{table_name}"')
         columns = [description[0] for description in src_cursor.description]
         records = src_cursor.fetchall()
-    except sqlite3.OperationalError as e:
-        print(f"  {table_name}: таблица не найдена в исходной базе")
+    except sqlite3.OperationalError:
+        logger.debug(f"  {table_name}: таблица не найдена в исходной базе")
         return seen_hashes
 
     unique_records_added = 0
-    local_id_mapping = {}  # old_id -> new_id для текущей таблицы
+    local_id_mapping: Dict[int, int] = {}  # old_id -> new_id для текущей таблицы
 
     # Определяем первичный ключ для таблицы
     pk_column = PRIMARY_KEYS.get(table_name)
@@ -280,10 +321,10 @@ def copy_unique_records(src_conn, dst_conn, table_name, seen_hashes, id_mapping=
                 if "has no column" in str(e):
                     continue
                 else:
-                    print(f"Ошибка при вставке в {table_name}: {e}")
-                    print(f"Значения: {record}")
+                    logger.warning(f"Ошибка при вставке в {table_name}: {e}")
+                    logger.debug(f"Значения: {record}")
 
-    print(f"  {table_name}: добавлено {unique_records_added} уникальных записей")
+    logger.debug(f"  {table_name}: добавлено {unique_records_added} уникальных записей")
 
     # Сохраняем маппинг в общий dict
     if id_mapping is not None and local_id_mapping:
@@ -292,15 +333,19 @@ def copy_unique_records(src_conn, dst_conn, table_name, seen_hashes, id_mapping=
     return seen_hashes
 
 
-def create_merged_db(archive_paths, output_path):
+def create_merged_db(archive_paths: List[Path], output_path: Path, verbose: bool = False) -> Path:
     """Создание объединённой базы данных с транзакциями и откатом при ошибках
 
     Args:
         archive_paths: Список путей к архивам .jwlibrary
         output_path: Путь для выходной базы данных
+        verbose: Включить подробный вывод
+
+    Returns:
+        Путь к созданной базе данных
 
     Raises:
-        Exception: При критической ошибке во время слияния
+        RuntimeError: При критической ошибке во время слияния
     """
     # Используем структуру из первого архива
     first_archive = archive_paths[0]
@@ -310,13 +355,13 @@ def create_merged_db(archive_paths, output_path):
         shutil.copyfile(first_db_path, output_path)
 
     # Открываем объединённую базу данных
-    merged_conn = sqlite3.connect(output_path)
+    merged_conn = sqlite3.connect(str(output_path))
 
     # Отключаем внешние ключи на время импорта (включаем только в конце)
     merged_conn.execute("PRAGMA foreign_keys = OFF")
 
     # Множества для отслеживания уникальных хэшей
-    seen_hashes = {
+    seen_hashes: Dict[str, Set[str]] = {
         'Note': set(),
         'UserMark': set(),
         'Location': set(),
@@ -327,23 +372,26 @@ def create_merged_db(archive_paths, output_path):
     }
 
     # Маппинг ID для связанных таблиц
-    id_mapping = {}
+    id_mapping: Dict[str, Dict[int, int]] = {}
 
     try:
         # Обрабатываем каждый архив
-        for i, archive_path in enumerate(archive_paths):
-            print(f"Обработка архива {i+1}/{len(archive_paths)}: {Path(archive_path).name}")
+        archive_iterator = tqdm(archive_paths, desc="Архивы", disable=not verbose)
+        for i, archive_path in enumerate(archive_iterator):
+            logger.debug(f"Обработка архива {i+1}/{len(archive_paths)}: {archive_path.name}")
 
             with tempfile.TemporaryDirectory() as temp_dir:
                 db_path, _ = extract_from_archive(archive_path, temp_dir)
-                src_conn = sqlite3.connect(db_path)
+                src_conn = sqlite3.connect(str(db_path))
 
                 # Копируем уникальные записи из каждой таблицы в правильном порядке
-                for table_name in TABLE_ORDER:
-                    print(f"  Обработка {table_name}...")
+                table_iterator = tqdm(TABLE_ORDER, desc=f"Таблицы ({archive_path.name[:30]})", disable=not verbose, leave=False)
+                for table_name in table_iterator:
                     seen_hashes[table_name] = copy_unique_records(
                         src_conn, merged_conn, table_name, seen_hashes[table_name], id_mapping
                     )
+                    if verbose:
+                        table_iterator.set_postfix(**{table_name: len(seen_hashes[table_name])})
 
                 src_conn.close()
 
@@ -357,7 +405,8 @@ def create_merged_db(archive_paths, output_path):
         # Включаем внешние ключи и проверяем целостность
         merged_conn.execute("PRAGMA foreign_keys = ON")
         merged_conn.commit()
-        print(f"Объединённая база данных создана: {output_path}")
+        logger.info(f"Объединённая база данных создана: {output_path}")
+        return output_path
 
     except Exception as e:
         # Откат при ошибке
@@ -420,62 +469,79 @@ def create_backup_archive(db_path, manifest_data, output_archive_path):
 def main():
     parser = argparse.ArgumentParser(description='Объединение нескольких бэкапов JW Library в один')
     parser.add_argument('input_dir', help='Директория с архивами .jwlibrary')
-    parser.add_argument('-o', '--output', help='Выходной архив (по умолчанию: combined_backup.jwlibrary)', 
+    parser.add_argument('-o', '--output', help='Выходной архив (по умолчанию: combined_backup.jwlibrary)',
                         default='combined_backup.jwlibrary')
     parser.add_argument('--output-dir', help='Директория для сохранения результатов', default='.')
-    
+    parser.add_argument('-v', '--verbose', action='store_true', help='Включить подробный вывод (debug режим)')
+    parser.add_argument('--dry-run', action='store_true', help='Режим проверки без записи файлов')
+
     args = parser.parse_args()
-    
+
+    # Настройка логирования
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(log_level)
+    formatter = logging.Formatter('%(levelname)s: %(message)s')
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     if not input_dir.exists():
-        print(f"Ошибка: директория {input_dir} не существует")
+        logger.error(f"Директория {input_dir} не существует")
         sys.exit(1)
-    
+
     # Находим все архивы
     archive_files = list(input_dir.glob('*.jwlibrary'))
     if not archive_files:
-        print(f"Ошибка: не найдено архивов .jwlibrary в директории {input_dir}")
+        logger.error(f"Не найдено архивов .jwlibrary в директории {input_dir}")
         sys.exit(1)
-    
-    print(f"Найдено {len(archive_files)} архивов для объединения")
+
+    logger.info(f"Найдено {len(archive_files)} архивов для объединения")
+
+    if args.dry_run:
+        logger.info("DRY-RUN: Режим проверки без записи")
+        for archive in archive_files:
+            logger.info(f"  - {archive.name}")
+        logger.info("DRY-RUN: Завершено")
+        return
     
     # Создаём временную директорию для работы
     with tempfile.TemporaryDirectory() as work_dir:
         work_path = Path(work_dir)
         output_db_path = work_path / 'merged_userData.db'
-        
+
         # Создаём объединённую базу данных
-        create_merged_db(archive_files, output_db_path)
-        
+        create_merged_db(archive_files, output_db_path, verbose=args.verbose)
+
         # Подсчитываем результаты
-        conn = sqlite3.connect(output_db_path)
+        conn = sqlite3.connect(str(output_db_path))
         cursor = conn.cursor()
-        
+
         tables = ['Note', 'UserMark', 'Location', 'Tag', 'TagMap', 'Bookmark', 'BlockRange']
-        print("\nРезультаты объединения:")
+        logger.info("\nРезультаты объединения:")
         for table in tables:
             try:
-                cursor.execute(f"SELECT COUNT(*) FROM {table}")
+                cursor.execute(f'SELECT COUNT(*) FROM "{table}"')
                 count = cursor.fetchone()[0]
-                print(f"  {table}: {count} записей")
+                logger.info(f"  {table}: {count} записей")
             except sqlite3.OperationalError:
-                print(f"  {table}: ошибка (таблица не существует)")
-        
+                logger.warning(f"  {table}: ошибка (таблица не существует)")
+
         conn.close()
-        
+
         # Создаём манифест
-        print("\nСоздание манифеста...")
+        logger.info("Создание манифеста...")
         manifest_data = create_manifest_from_archives(archive_files, output_db_path)
-        
+
         # Создаём финальный архив
         output_archive_path = output_dir / args.output
         create_backup_archive(output_db_path, manifest_data, output_archive_path)
-        
-        print(f"\nОбъединённый бэкап успешно создан: {output_archive_path}")
-        print("Процесс завершён успешно!")
+
+        logger.info(f"Объединённый бэкап успешно создан: {output_archive_path}")
+        logger.info("Процесс завершён успешно!")
 
 
 if __name__ == "__main__":
