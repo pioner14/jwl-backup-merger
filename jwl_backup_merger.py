@@ -97,7 +97,13 @@ def extract_from_archive(archive_path, extract_dir):
     """Извлечение архива JW Library"""
     with zipfile.ZipFile(archive_path, 'r') as zip_ref:
         zip_ref.extractall(extract_dir)
-        return Path(extract_dir) / 'userData.db', Path(extract_dir) / 'manifest.json'
+
+        # Проверяем оба возможных имени файла БД
+        db_path = Path(extract_dir) / 'userData.db'
+        if not db_path.exists():
+            db_path = Path(extract_dir) / 'user_data.db'
+
+        return db_path, Path(extract_dir) / 'manifest.json'
 
 
 def copy_unique_records(src_conn, dst_conn, table_name, seen_hashes):
@@ -185,8 +191,7 @@ def create_merged_db(archive_paths, output_path):
     
     # Обновляем LastModified
     try:
-        merged_conn.execute("DELETE FROM LastModified")
-        merged_conn.execute("INSERT INTO LastModified VALUES (?)", (datetime.now().isoformat().split('.')[0] + "+00:00",))
+        merged_conn.execute("UPDATE LastModified SET value = ?", (datetime.now().isoformat().split('.')[0] + "+00:00",))
     except sqlite3.OperationalError:
         # Если таблица LastModified не существует, пропускаем
         pass
