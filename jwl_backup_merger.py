@@ -106,11 +106,15 @@ def extract_from_archive(archive_path, extract_dir):
         return db_path, Path(extract_dir) / 'manifest.json'
 
 
-def copy_unique_records(src_conn, dst_conn, table_name, seen_hashes):
-    """Копирование уникальных записей с улучшенной логикой"""
+def copy_unique_records(src_conn, dst_conn, table_name, seen_hashes, id_mapping=None):
+    """Копирование уникальных записей с маппингом ID для связанных таблиц
+
+    Args:
+        id_mapping: dict для маппинга ID (например, {'Tag': {old_id: new_id, ...}})
+    """
     src_cursor = src_conn.cursor()
     dst_cursor = dst_conn.cursor()
-    
+
     try:
         src_cursor.execute(f"SELECT * FROM {table_name}")
         columns = [description[0] for description in src_cursor.description]
@@ -118,24 +122,105 @@ def copy_unique_records(src_conn, dst_conn, table_name, seen_hashes):
     except sqlite3.OperationalError:
         print(f"  {table_name}: таблица не найдена в исходной базе")
         return seen_hashes
-    
+
     unique_records_added = 0
-    
+    local_id_mapping = {}  # old_id -> new_id для текущей таблицы
+
+    # Определяем первичный ключ для таблицы
+    pk_column = None
+    if table_name == 'Tag':
+        pk_column = 'TagId'
+    elif table_name == 'UserMark':
+        pk_column = 'UserMarkId'
+    elif table_name == 'Location':
+        pk_column = 'LocationId'
+    elif table_name == 'Note':
+        pk_column = 'NoteId'
+    elif table_name == 'Bookmark':
+        pk_column = 'BookmarkId'
+    elif table_name == 'BlockRange':
+        pk_column = 'BlockRangeId'
+    elif table_name == 'TagMap':
+        pk_column = 'TagMapId'
+
     for record in records:
         record_dict = dict(zip(columns, record))
         record_hash = generate_record_hash(table_name, record_dict)
-        
+
         if record_hash not in seen_hashes:
             seen_hashes.add(record_hash)
-            
+
+            # Создаём mutable копию записи
+            record_list = list(record)
+
+            # Для TagMap нужно обновить TagId согласно маппингу
+            if table_name == 'TagMap' and id_mapping and 'Tag' in id_mapping:
+                tag_id_idx = columns.index('TagId') if 'TagId' in columns else -1
+                if tag_id_idx >= 0:
+                    old_tag_id = record_list[tag_id_idx]
+                    if old_tag_id and old_tag_id in id_mapping['Tag']:
+                        record_list[tag_id_idx] = id_mapping['Tag'][old_tag_id]
+
+            # Для BlockRange нужно обновить UserMarkId согласно маппингу
+            if table_name == 'BlockRange' and id_mapping and 'UserMark' in id_mapping:
+                user_mark_id_idx = columns.index('UserMarkId') if 'UserMarkId' in columns else -1
+                if user_mark_id_idx >= 0:
+                    old_user_mark_id = record_list[user_mark_id_idx]
+                    if old_user_mark_id and old_user_mark_id in id_mapping['UserMark']:
+                        record_list[user_mark_id_idx] = id_mapping['UserMark'][old_user_mark_id]
+
+            # Для Note нужно обновить LocationId и UserMarkId согласно маппингу
+            if table_name == 'Note':
+                if id_mapping and 'Location' in id_mapping:
+                    loc_idx = columns.index('LocationId') if 'LocationId' in columns else -1
+                    if loc_idx >= 0:
+                        old_loc_id = record_list[loc_idx]
+                        if old_loc_id and old_loc_id in id_mapping['Location']:
+                            record_list[loc_idx] = id_mapping['Location'][old_loc_id]
+                if id_mapping and 'UserMark' in id_mapping:
+                    um_idx = columns.index('UserMarkId') if 'UserMarkId' in columns else -1
+                    if um_idx >= 0 and record_list[um_idx] is not None:
+                        old_um_id = record_list[um_idx]
+                        if old_um_id and old_um_id in id_mapping['UserMark']:
+                            record_list[um_idx] = id_mapping['UserMark'][old_um_id]
+
+            # Для Bookmark нужно обновить LocationId
+            if table_name == 'Bookmark' and id_mapping and 'Location' in id_mapping:
+                loc_idx = columns.index('LocationId') if 'LocationId' in columns else -1
+                if loc_idx >= 0:
+                    old_loc_id = record_list[loc_idx]
+                    if old_loc_id and old_loc_id in id_mapping['Location']:
+                        record_list[loc_idx] = id_mapping['Location'][old_loc_id]
+
+            record = tuple(record_list)
+
             # Подготовим SQL для вставки
             placeholders = ', '.join(['?' for _ in columns])
             column_names = ', '.join([f'"{col}"' for col in columns])
             sql = f"INSERT OR IGNORE INTO {table_name} ({column_names}) VALUES ({placeholders})"
-            
+
             try:
                 dst_cursor.execute(sql, record)
+
+                # Получаем ID вставленной записи (или существующей)
+                if pk_column:
+                    old_id = record_dict.get(pk_column)
+                    # Пытаемся получить lastrowid
+                    new_id = dst_cursor.lastrowid
+
+                    # Если lastrowid None, значит запись уже существовала - ищем её
+                    if new_id is None and old_id is not None:
+                        # Находим существующую запись по уникальным полям (хэшу)
+                        dst_cursor.execute(f"SELECT {pk_column} FROM {table_name} WHERE rowid = last_insert_rowid()")
+                        row = dst_cursor.fetchone()
+                        if row:
+                            new_id = row[0]
+
+                    if old_id and new_id and old_id != new_id:
+                        local_id_mapping[old_id] = new_id
+
                 unique_records_added += 1
+
             except sqlite3.Error as e:
                 # Игнорируем ошибки, связанные с несовместимыми столбцами
                 if "has no column" in str(e):
@@ -143,9 +228,13 @@ def copy_unique_records(src_conn, dst_conn, table_name, seen_hashes):
                 else:
                     print(f"Ошибка при вставке в {table_name}: {e}")
                     print(f"Значения: {record}")
-    
+
     print(f"  {table_name}: добавлено {unique_records_added} уникальных записей")
-    
+
+    # Сохраняем маппинг в общий dict
+    if id_mapping is not None and local_id_mapping:
+        id_mapping[table_name] = local_id_mapping
+
     return seen_hashes
 
 
@@ -157,10 +246,10 @@ def create_merged_db(archive_paths, output_path):
         _, _ = extract_from_archive(first_archive, temp_dir)
         first_db_path = Path(temp_dir) / 'userData.db'
         shutil.copyfile(first_db_path, output_path)
-    
+
     # Открываем объединённую базу данных
     merged_conn = sqlite3.connect(output_path)
-    
+
     # Множества для отслеживания уникальных хэшей
     seen_hashes = {
         'Note': set(),
@@ -171,34 +260,42 @@ def create_merged_db(archive_paths, output_path):
         'Bookmark': set(),
         'BlockRange': set()
     }
-    
+
+    # Маппинг ID для связанных таблиц
+    id_mapping = {}
+
+    # Порядок важен: Tag должен быть перед TagMap (т.к. TagMap ссылается на Tag)
+    # UserMark должен быть перед BlockRange (т.к. BlockRange ссылается на UserMark)
+    # Location должен быть перед Note, Bookmark (т.к. они ссылаются на Location)
+    table_order = ['Location', 'UserMark', 'Tag', 'Note', 'TagMap', 'Bookmark', 'BlockRange']
+
     # Обрабатываем каждый архив
     for i, archive_path in enumerate(archive_paths):
         print(f"Обработка архива {i+1}/{len(archive_paths)}: {Path(archive_path).name}")
-        
+
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path, _ = extract_from_archive(archive_path, temp_dir)
             src_conn = sqlite3.connect(db_path)
-            
-            # Копируем уникальные записи из каждой таблицы
-            for table_name in seen_hashes.keys():
+
+            # Копируем уникальные записи из каждой таблицы в правильном порядке
+            for table_name in table_order:
                 print(f"  Обработка {table_name}...")
                 seen_hashes[table_name] = copy_unique_records(
-                    src_conn, merged_conn, table_name, seen_hashes[table_name]
+                    src_conn, merged_conn, table_name, seen_hashes[table_name], id_mapping
                 )
-            
+
             src_conn.close()
-    
+
     # Обновляем LastModified
     try:
         merged_conn.execute("UPDATE LastModified SET value = ?", (datetime.now().isoformat().split('.')[0] + "+00:00",))
     except sqlite3.OperationalError:
         # Если таблица LastModified не существует, пропускаем
         pass
-    
+
     merged_conn.commit()
     merged_conn.close()
-    
+
     print(f"Объединённая база данных создана: {output_path}")
 
 
