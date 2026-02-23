@@ -25,6 +25,25 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
+# Whitelist допустимых имён таблиц для безопасности
+ALLOWED_TABLES = frozenset([
+    'Note', 'UserMark', 'Location', 'Tag', 'TagMap', 'Bookmark', 'BlockRange'
+])
+
+# Порядок обработки таблиц (сначала родительские, потом дочерние)
+TABLE_ORDER = ['Location', 'UserMark', 'Tag', 'Note', 'TagMap', 'Bookmark', 'BlockRange']
+
+# Первичные ключи для каждой таблицы
+PRIMARY_KEYS = {
+    'Tag': 'TagId',
+    'UserMark': 'UserMarkId',
+    'Location': 'LocationId',
+    'Note': 'NoteId',
+    'Bookmark': 'BookmarkId',
+    'BlockRange': 'BlockRangeId',
+    'TagMap': 'TagMapId'
+}
+
 
 def generate_record_hash(table_name, record_data):
     """Создание уникального хэша для записи"""
@@ -106,20 +125,67 @@ def extract_from_archive(archive_path, extract_dir):
         return db_path, Path(extract_dir) / 'manifest.json'
 
 
+def validate_database_schema(db_path):
+    """Проверка схемы базы данных на наличие требуемых таблиц
+
+    Args:
+        db_path: Путь к файлу базы данных
+
+    Returns:
+        tuple: (is_valid, missing_tables, error_message)
+    """
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+
+        # Получаем список всех таблиц
+        cursor.execute("""
+            SELECT name FROM sqlite_master
+            WHERE type='table' AND name NOT LIKE 'sqlite_%'
+        """)
+        existing_tables = {row[0] for row in cursor.fetchall()}
+        conn.close()
+
+        # Проверяем наличие требуемых таблиц
+        missing_tables = []
+        for table in ALLOWED_TABLES:
+            if table not in existing_tables:
+                missing_tables.append(table)
+
+        if missing_tables:
+            return False, missing_tables, f"Отсутствуют таблицы: {', '.join(missing_tables)}"
+
+        return True, [], "Схема базы данных валидна"
+
+    except sqlite3.Error as e:
+        return False, [], f"Ошибка при проверке схемы: {e}"
+
+
 def copy_unique_records(src_conn, dst_conn, table_name, seen_hashes, id_mapping=None):
     """Копирование уникальных записей с маппингом ID для связанных таблиц
 
     Args:
+        src_conn: Подключение к исходной БД
+        dst_conn: Подключение к целевой БД
+        table_name: Имя таблицы для копирования
+        seen_hashes: Множество хэшей уже обработанных записей
         id_mapping: dict для маппинга ID (например, {'Tag': {old_id: new_id, ...}})
+
+    Returns:
+        Обновлённое множество seen_hashes
     """
+    # Проверка имени таблицы (защита от SQL injection)
+    if table_name not in ALLOWED_TABLES:
+        raise ValueError(f"Недопустимое имя таблицы: {table_name}")
+
     src_cursor = src_conn.cursor()
     dst_cursor = dst_conn.cursor()
 
     try:
-        src_cursor.execute(f"SELECT * FROM {table_name}")
+        src_cursor.execute(f'SELECT * FROM "{table_name}"')
         columns = [description[0] for description in src_cursor.description]
         records = src_cursor.fetchall()
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as e:
         print(f"  {table_name}: таблица не найдена в исходной базе")
         return seen_hashes
 
@@ -127,21 +193,7 @@ def copy_unique_records(src_conn, dst_conn, table_name, seen_hashes, id_mapping=
     local_id_mapping = {}  # old_id -> new_id для текущей таблицы
 
     # Определяем первичный ключ для таблицы
-    pk_column = None
-    if table_name == 'Tag':
-        pk_column = 'TagId'
-    elif table_name == 'UserMark':
-        pk_column = 'UserMarkId'
-    elif table_name == 'Location':
-        pk_column = 'LocationId'
-    elif table_name == 'Note':
-        pk_column = 'NoteId'
-    elif table_name == 'Bookmark':
-        pk_column = 'BookmarkId'
-    elif table_name == 'BlockRange':
-        pk_column = 'BlockRangeId'
-    elif table_name == 'TagMap':
-        pk_column = 'TagMapId'
+    pk_column = PRIMARY_KEYS.get(table_name)
 
     for record in records:
         record_dict = dict(zip(columns, record))
@@ -197,7 +249,7 @@ def copy_unique_records(src_conn, dst_conn, table_name, seen_hashes, id_mapping=
             # Подготовим SQL для вставки
             placeholders = ', '.join(['?' for _ in columns])
             column_names = ', '.join([f'"{col}"' for col in columns])
-            sql = f"INSERT OR IGNORE INTO {table_name} ({column_names}) VALUES ({placeholders})"
+            sql = f'INSERT OR IGNORE INTO "{table_name}" ({column_names}) VALUES ({placeholders})'
 
             try:
                 dst_cursor.execute(sql, record)
@@ -211,7 +263,9 @@ def copy_unique_records(src_conn, dst_conn, table_name, seen_hashes, id_mapping=
                     # Если lastrowid None, значит запись уже существовала - ищем её
                     if new_id is None and old_id is not None:
                         # Находим существующую запись по уникальным полям (хэшу)
-                        dst_cursor.execute(f"SELECT {pk_column} FROM {table_name} WHERE rowid = last_insert_rowid()")
+                        dst_cursor.execute(
+                            f'SELECT "{pk_column}" FROM "{table_name}" WHERE rowid = last_insert_rowid()'
+                        )
                         row = dst_cursor.fetchone()
                         if row:
                             new_id = row[0]
@@ -239,7 +293,15 @@ def copy_unique_records(src_conn, dst_conn, table_name, seen_hashes, id_mapping=
 
 
 def create_merged_db(archive_paths, output_path):
-    """Создание объединённой базы данных"""
+    """Создание объединённой базы данных с транзакциями и откатом при ошибках
+
+    Args:
+        archive_paths: Список путей к архивам .jwlibrary
+        output_path: Путь для выходной базы данных
+
+    Raises:
+        Exception: При критической ошибке во время слияния
+    """
     # Используем структуру из первого архива
     first_archive = archive_paths[0]
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -249,6 +311,9 @@ def create_merged_db(archive_paths, output_path):
 
     # Открываем объединённую базу данных
     merged_conn = sqlite3.connect(output_path)
+
+    # Отключаем внешние ключи на время импорта (включаем только в конце)
+    merged_conn.execute("PRAGMA foreign_keys = OFF")
 
     # Множества для отслеживания уникальных хэшей
     seen_hashes = {
@@ -264,39 +329,44 @@ def create_merged_db(archive_paths, output_path):
     # Маппинг ID для связанных таблиц
     id_mapping = {}
 
-    # Порядок важен: Tag должен быть перед TagMap (т.к. TagMap ссылается на Tag)
-    # UserMark должен быть перед BlockRange (т.к. BlockRange ссылается на UserMark)
-    # Location должен быть перед Note, Bookmark (т.к. они ссылаются на Location)
-    table_order = ['Location', 'UserMark', 'Tag', 'Note', 'TagMap', 'Bookmark', 'BlockRange']
-
-    # Обрабатываем каждый архив
-    for i, archive_path in enumerate(archive_paths):
-        print(f"Обработка архива {i+1}/{len(archive_paths)}: {Path(archive_path).name}")
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            db_path, _ = extract_from_archive(archive_path, temp_dir)
-            src_conn = sqlite3.connect(db_path)
-
-            # Копируем уникальные записи из каждой таблицы в правильном порядке
-            for table_name in table_order:
-                print(f"  Обработка {table_name}...")
-                seen_hashes[table_name] = copy_unique_records(
-                    src_conn, merged_conn, table_name, seen_hashes[table_name], id_mapping
-                )
-
-            src_conn.close()
-
-    # Обновляем LastModified
     try:
-        merged_conn.execute("UPDATE LastModified SET value = ?", (datetime.now().isoformat().split('.')[0] + "+00:00",))
-    except sqlite3.OperationalError:
-        # Если таблица LastModified не существует, пропускаем
-        pass
+        # Обрабатываем каждый архив
+        for i, archive_path in enumerate(archive_paths):
+            print(f"Обработка архива {i+1}/{len(archive_paths)}: {Path(archive_path).name}")
 
-    merged_conn.commit()
-    merged_conn.close()
+            with tempfile.TemporaryDirectory() as temp_dir:
+                db_path, _ = extract_from_archive(archive_path, temp_dir)
+                src_conn = sqlite3.connect(db_path)
 
-    print(f"Объединённая база данных создана: {output_path}")
+                # Копируем уникальные записи из каждой таблицы в правильном порядке
+                for table_name in TABLE_ORDER:
+                    print(f"  Обработка {table_name}...")
+                    seen_hashes[table_name] = copy_unique_records(
+                        src_conn, merged_conn, table_name, seen_hashes[table_name], id_mapping
+                    )
+
+                src_conn.close()
+
+        # Обновляем LastModified
+        try:
+            merged_conn.execute("UPDATE LastModified SET value = ?", (datetime.now().isoformat().split('.')[0] + "+00:00",))
+        except sqlite3.OperationalError:
+            # Если таблица LastModified не существует, пропускаем
+            pass
+
+        # Включаем внешние ключи и проверяем целостность
+        merged_conn.execute("PRAGMA foreign_keys = ON")
+        merged_conn.commit()
+        print(f"Объединённая база данных создана: {output_path}")
+
+    except Exception as e:
+        # Откат при ошибке
+        merged_conn.rollback()
+        merged_conn.close()
+        raise RuntimeError(f"Ошибка при создании объединённой базы: {e}")
+
+    finally:
+        merged_conn.close()
 
 
 def create_manifest_from_archives(archive_paths, output_db_path):

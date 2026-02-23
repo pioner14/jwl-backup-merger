@@ -29,6 +29,12 @@ wheels/
 *.spec
 !jwl_backup_merger.spec
 
+# Тесты
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
