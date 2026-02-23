@@ -100,7 +100,7 @@ jobs:
       if: runner.os == 'Linux'
       uses: actions/upload-artifact@v4
       with:
-        name: jwl-backup-merger-linux
+        name: jwl-backup-merger-${{ runner.os }}-linux
         path: dist/jwl-backup-merger
         retention-days: 30
 
@@ -108,7 +108,7 @@ jobs:
       if: runner.os == 'Windows'
       uses: actions/upload-artifact@v4
       with:
-        name: jwl-backup-merger-windows
+        name: jwl-backup-merger-${{ runner.os }}-windows
         path: dist/jwl-backup-merger.exe
         retention-days: 30
 
@@ -116,53 +116,53 @@ jobs:
       if: runner.os == 'macOS'
       uses: actions/upload-artifact@v4
       with:
-        name: jwl-backup-merger-macos
+        name: jwl-backup-merger-${{ runner.os }}-macos
         path: dist/jwl-backup-merger
         retention-days: 30
 
   release:
-    needs: build
     runs-on: ubuntu-latest
     if: github.event_name == 'release' && github.event.action == 'created'
 
     steps:
     - uses: actions/checkout@v4
 
-    - name: Download Linux artifact
-      uses: actions/download-artifact@v4
+    - name: Set up Python
+      uses: actions/setup-python@v5
       with:
-        name: jwl-backup-merger-linux
-        path: release_assets/linux
+        python-version: "3.12"
 
-    - name: Download Windows artifact
-      uses: actions/download-artifact@v4
-      with:
-        name: jwl-backup-merger-windows
-        path: release_assets/windows
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
 
-    - name: Download macOS artifact
-      uses: actions/download-artifact@v4
+    - name: Build Linux binary
+      run: |
+        pyinstaller jwl_backup_merger.spec --clean
+
+    - name: Build Windows binary
+      uses: JackMcKew/pyinstaller-action-windows@main
       with:
-        name: jwl-backup-merger-macos
-        path: release_assets/macos
+        spec: jwl_backup_merger.spec
+
+    - name: Build macOS binary
+      run: |
+        pyinstaller jwl_backup_merger.spec --clean
 
     - name: Prepare release assets
       run: |
-        cd release_assets
-        chmod +x linux/jwl-backup-merger
-        chmod +x macos/jwl-backup-merger
-        # Переименуем для ясности
-        mv linux/jwl-backup-merger jwl-backup-merger-linux
-        mv windows/jwl-backup-merger.exe jwl-backup-merger-windows.exe
-        mv macos/jwl-backup-merger jwl-backup-merger-macos
+        mkdir -p release_assets
+        cp dist/jwl-backup-merger release_assets/jwl-backup-merger-linux
+        cp build/windows/dist/jwl-backup-merger/jwl-backup-merger.exe release_assets/jwl-backup-merger-windows.exe
+        # macOS binary будет собран отдельно если нужно
 
-    - name: Create Release with assets
+    - name: Upload Release Assets
       uses: softprops/action-gh-release@v1
       with:
         files: |
           release_assets/jwl-backup-merger-linux
           release_assets/jwl-backup-merger-windows.exe
-          release_assets/jwl-backup-merger-macos
         generate_release_notes: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
