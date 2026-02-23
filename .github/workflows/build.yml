@@ -5,6 +5,8 @@ on:
     branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
+  release:
+    types: [created]
 
 jobs:
   lint:
@@ -121,43 +123,46 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    if: github.event_name == 'release' && github.event.action == 'created'
 
     steps:
     - uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
+    - name: Download Linux artifact
+      uses: actions/download-artifact@v4
       with:
-        python-version: "3.12"
+        name: jwl-backup-merger-linux
+        path: release_assets/linux
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-
-    - name: Build binary for Linux
-      run: |
-        pyinstaller jwl_backup_merger.spec --clean
-
-    - name: Build binary for Windows
-      uses: JackMcKew/pyinstaller-action-windows@main
+    - name: Download Windows artifact
+      uses: actions/download-artifact@v4
       with:
-        spec: jwl_backup_merger.spec
+        name: jwl-backup-merger-windows
+        path: release_assets/windows
 
-    - name: Build binary for macOS
+    - name: Download macOS artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: jwl-backup-merger-macos
+        path: release_assets/macos
+
+    - name: Prepare release assets
       run: |
-        pyinstaller jwl_backup_merger.spec --clean
-      env:
-        RUNNER_OS: macOS
+        cd release_assets
+        chmod +x linux/jwl-backup-merger
+        chmod +x macos/jwl-backup-merger
+        # Переименуем для ясности
+        mv linux/jwl-backup-merger jwl-backup-merger-linux
+        mv windows/jwl-backup-merger.exe jwl-backup-merger-windows.exe
+        mv macos/jwl-backup-merger jwl-backup-merger-macos
 
-    - name: Create Release
+    - name: Create Release with assets
       uses: softprops/action-gh-release@v1
       with:
         files: |
-          dist/jwl-backup-merger
-          dist/jwl-backup-merger.exe
-          build/windows/dist/jwl-backup-merger/jwl-backup-merger.exe
+          release_assets/jwl-backup-merger-linux
+          release_assets/jwl-backup-merger-windows.exe
+          release_assets/jwl-backup-merger-macos
         generate_release_notes: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
