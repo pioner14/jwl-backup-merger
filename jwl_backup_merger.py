@@ -287,13 +287,22 @@ def copy_unique_records(
 
             record = tuple(record_list)
 
-            # Подготовим SQL для вставки
-            placeholders = ', '.join(['?' for _ in columns])
-            column_names = ', '.join([f'"{col}"' for col in columns])
+            # Исключаем первичный ключ из вставки, чтобы SQLite назначал новые ID
+            # Это предотвращает конфликты при INSERT OR IGNORE когда PK уже существует
+            if pk_column and pk_column in columns:
+                pk_index = columns.index(pk_column)
+                insert_columns = [col for col in columns if col != pk_column]
+                insert_record = record[:pk_index] + record[pk_index + 1:]
+            else:
+                insert_columns = columns
+                insert_record = record
+
+            placeholders = ', '.join(['?' for _ in insert_columns])
+            column_names = ', '.join([f'"{col}"' for col in insert_columns])
             sql = f'INSERT OR IGNORE INTO "{table_name}" ({column_names}) VALUES ({placeholders})'
 
             try:
-                dst_cursor.execute(sql, record)
+                dst_cursor.execute(sql, insert_record)
 
                 # Получаем ID вставленной записи (или существующей)
                 if pk_column:
@@ -322,7 +331,7 @@ def copy_unique_records(
                     continue
                 else:
                     logger.warning(f"Ошибка при вставке в {table_name}: {e}")
-                    logger.debug(f"Значения: {record}")
+                    logger.debug(f"Значения: {insert_record}")
 
     logger.debug(f"  {table_name}: добавлено {unique_records_added} уникальных записей")
 
@@ -350,8 +359,7 @@ def create_merged_db(archive_paths: List[Path], output_path: Path, verbose: bool
     # Используем структуру из первого архива
     first_archive = archive_paths[0]
     with tempfile.TemporaryDirectory() as temp_dir:
-        _, _ = extract_from_archive(first_archive, temp_dir)
-        first_db_path = Path(temp_dir) / 'userData.db'
+        first_db_path, _ = extract_from_archive(first_archive, temp_dir)
         shutil.copyfile(first_db_path, output_path)
 
     # Открываем объединённую базу данных
@@ -474,32 +482,54 @@ def main():
     parser.add_argument('--output-dir', help='Директория для сохранения результатов', default='.')
     parser.add_argument('-v', '--verbose', action='store_true', help='Включить подробный вывод (debug режим)')
     parser.add_argument('--dry-run', action='store_true', help='Режим проверки без записи файлов')
+    parser.add_argument('--log-file', help='Путь к файлу лога (по умолчанию: jwl_backup_merger.log)',
+                        default='jwl_backup_merger.log')
 
     args = parser.parse_args()
 
     # Настройка логирования
     log_level = logging.DEBUG if args.verbose else logging.INFO
+
+    # Консольный обработчик
     console_handler = logging.StreamHandler()
     console_handler.setLevel(log_level)
-    formatter = logging.Formatter('%(levelname)s: %(message)s')
-    console_handler.setFormatter(formatter)
+    console_formatter = logging.Formatter('%(levelname)s: %(message)s')
+    console_handler.setFormatter(console_formatter)
     logger.addHandler(console_handler)
+
+    # Файловый обработчик - всегда записываем лог
+    file_handler = logging.FileHandler(args.log_file, mode='w', encoding='utf-8')
+    file_handler.setLevel(logging.DEBUG)
+    file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(file_formatter)
+    logger.addHandler(file_handler)
+
+    logger.info(f"Лог записывается в файл: {args.log_file}")
 
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if not input_dir.exists():
-        logger.error(f"Директория {input_dir} не существует")
+        logger.error(f"❌ ОШИБКА: Директория {input_dir} не существует")
+        logger.error(f"   Проверьте путь и попробуйте снова")
+        logger.info(f"\n{'='*60}")
+        logger.info("❌ СТАТУС: ОШИБКА")
+        logger.info(f"{'='*60}")
         sys.exit(1)
 
     # Находим все архивы
     archive_files = list(input_dir.glob('*.jwlibrary'))
     if not archive_files:
-        logger.error(f"Не найдено архивов .jwlibrary в директории {input_dir}")
+        logger.error(f"❌ ОШИБКА: Не найдено архивов .jwlibrary в директории {input_dir}")
+        logger.error(f"   Добавьте файлы бэкапов в эту директорию")
+        logger.info(f"\n{'='*60}")
+        logger.info("❌ СТАТУС: ОШИБКА")
+        logger.info(f"{'='*60}")
         sys.exit(1)
 
     logger.info(f"Найдено {len(archive_files)} архивов для объединения")
+    logger.info(f"Архивы: {[a.name for a in archive_files]}")
 
     if args.dry_run:
         logger.info("DRY-RUN: Режим проверки без записи")
@@ -507,41 +537,99 @@ def main():
             logger.info(f"  - {archive.name}")
         logger.info("DRY-RUN: Завершено")
         return
-    
+
+    start_time = datetime.now()
+    logger.info(f"Начало обработки: {start_time.isoformat()}")
+    logger.info(f"Входная директория: {input_dir.absolute()}")
+    logger.info(f"Выходной файл: {args.output}")
+    logger.info(f"Директория вывода: {output_dir.absolute()}")
+
+    error_details = None
     # Создаём временную директорию для работы
-    with tempfile.TemporaryDirectory() as work_dir:
-        work_path = Path(work_dir)
-        output_db_path = work_path / 'merged_userData.db'
+    try:
+        with tempfile.TemporaryDirectory() as work_dir:
+            work_path = Path(work_dir)
+            output_db_path = work_path / 'merged_userData.db'
 
-        # Создаём объединённую базу данных
-        create_merged_db(archive_files, output_db_path, verbose=args.verbose)
+            # Создаём объединённую базу данных
+            logger.info("Шаг 1/4: Создание объединённой базы данных...")
+            create_merged_db(archive_files, output_db_path, verbose=args.verbose)
+            logger.info("  ✓ База данных создана")
 
-        # Подсчитываем результаты
-        conn = sqlite3.connect(str(output_db_path))
-        cursor = conn.cursor()
+            # Подсчитываем результаты
+            logger.info("Шаг 2/4: Подсчёт результатов...")
+            conn = sqlite3.connect(str(output_db_path))
+            cursor = conn.cursor()
 
-        tables = ['Note', 'UserMark', 'Location', 'Tag', 'TagMap', 'Bookmark', 'BlockRange']
-        logger.info("\nРезультаты объединения:")
-        for table in tables:
-            try:
-                cursor.execute(f'SELECT COUNT(*) FROM "{table}"')
-                count = cursor.fetchone()[0]
-                logger.info(f"  {table}: {count} записей")
-            except sqlite3.OperationalError:
-                logger.warning(f"  {table}: ошибка (таблица не существует)")
+            tables = ['Note', 'UserMark', 'Location', 'Tag', 'TagMap', 'Bookmark', 'BlockRange']
+            results = {}
+            for table in tables:
+                try:
+                    cursor.execute(f'SELECT COUNT(*) FROM "{table}"')
+                    count = cursor.fetchone()[0]
+                    results[table] = count
+                except sqlite3.OperationalError:
+                    logger.warning(f"  ⚠ Таблица {table} не существует")
+                    results[table] = 0
 
-        conn.close()
+            conn.close()
+            logger.info("  ✓ Результаты подсчитаны")
 
-        # Создаём манифест
-        logger.info("Создание манифеста...")
-        manifest_data = create_manifest_from_archives(archive_files, output_db_path)
+            # Создаём манифест
+            logger.info("Шаг 3/4: Создание манифеста...")
+            manifest_data = create_manifest_from_archives(archive_files, output_db_path)
+            logger.info("  ✓ Манифест создан")
 
-        # Создаём финальный архив
-        output_archive_path = output_dir / args.output
-        create_backup_archive(output_db_path, manifest_data, output_archive_path)
+            # Создаём финальный архив
+            logger.info("Шаг 4/4: Создание финального архива...")
+            output_archive_path = output_dir / args.output
+            create_backup_archive(output_db_path, manifest_data, output_archive_path)
+            logger.info(f"  ✓ Архив создан: {output_archive_path}")
 
-        logger.info(f"Объединённый бэкап успешно создан: {output_archive_path}")
-        logger.info("Процесс завершён успешно!")
+    except Exception as e:
+        error_details = {
+            'type': type(e).__name__,
+            'message': str(e),
+            'traceback': __import__('traceback').format_exc()
+        }
+        logger.error(f"\n{'='*60}")
+        logger.error("ОШИБКА ВЫПОЛНЕНИЯ")
+        logger.error(f"{'='*60}")
+        logger.error(f"Тип ошибки: {error_details['type']}")
+        logger.error(f"Сообщение: {error_details['message']}")
+        logger.error(f"\nПолный стек вызовов:\n{error_details['traceback']}")
+        logger.error(f"{'='*60}")
+
+    finally:
+        end_time = datetime.now()
+        duration = end_time - start_time
+
+        logger.info(f"\n{'='*60}")
+        logger.info("ИТОГИ ВЫПОЛНЕНИЯ")
+        logger.info(f"{'='*60}")
+        logger.info(f"Старт: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"Финиш: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"Длительность: {duration}")
+        logger.info(f"Обработано архивов: {len(archive_files)}")
+
+        if error_details:
+            logger.info(f"\n❌ СТАТУС: ОШИБКА")
+            logger.info(f"   Тип: {error_details['type']}")
+            logger.info(f"   Сообщение: {error_details['message']}")
+            logger.info(f"\nПодробности в логе выше ↑")
+            logger.info(f"{'='*60}")
+            sys.exit(1)
+        else:
+            logger.info(f"\n✅ СТАТУС: УСПЕШНО")
+            logger.info(f"\nРезультаты по таблицам:")
+            for table, count in results.items():
+                logger.info(f"   {table}: {count} записей")
+            total = sum(results.values())
+            logger.info(f"   ─────────────────")
+            logger.info(f"   ВСЕГО: {total} записей")
+            logger.info(f"\nВыходной файл: {output_archive_path.absolute()}")
+            logger.info(f"Лог файл: {args.log_file}")
+            logger.info(f"{'='*60}")
 
 
 if __name__ == "__main__":

@@ -66,10 +66,8 @@ jobs:
       run: |
         python jwl_backup_merger.py --help
 
-  build-release:
+  build-linux:
     runs-on: ubuntu-latest
-    if: github.event_name == 'release'
-    
     steps:
     - uses: actions/checkout@v4
 
@@ -89,31 +87,40 @@ jobs:
         cp dist/jwl-backup-merger jwl-backup-merger-linux
         chmod +x jwl-backup-merger-linux
 
-    - name: Build Windows binary
-      uses: JackMcKew/pyinstaller-action-windows@main
-      with:
-        spec: jwl_backup_merger.spec
-
-    - name: Prepare Windows binary
-      run: |
-        cp build/windows/dist/jwl-backup-merger/jwl-backup-merger.exe jwl-backup-merger-windows.exe
-
     - name: Upload Linux binary
       uses: actions/upload-artifact@v4
       with:
         name: jwl-backup-merger-linux
         path: jwl-backup-merger-linux
 
+  build-windows:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Build Windows binary
+      run: |
+        pyinstaller jwl_backup_merger.spec --clean
+      shell: bash
+
     - name: Upload Windows binary
       uses: actions/upload-artifact@v4
       with:
         name: jwl-backup-merger-windows
-        path: jwl-backup-merger-windows.exe
+        path: dist/jwl-backup-merger.exe
 
-  build-release-macos:
+  build-macos:
     runs-on: macos-latest
-    if: github.event_name == 'release'
-    
     steps:
     - uses: actions/checkout@v4
 
@@ -140,7 +147,7 @@ jobs:
         path: jwl-backup-merger-macos
 
   publish-release:
-    needs: [build-release, build-release-macos]
+    needs: [build-linux, build-windows, build-macos]
     runs-on: ubuntu-latest
     if: github.event_name == 'release'
 
