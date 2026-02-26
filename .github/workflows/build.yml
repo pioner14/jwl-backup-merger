@@ -26,12 +26,12 @@ jobs:
 
     - name: Lint with flake8
       run: |
-        flake8 jwl_backup_merger.py --count --select=E9,F63,F7,F82 --show-source --statistics
-        flake8 jwl_backup_merger.py --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+        flake8 jwl_backup_merger.py jwl_backup_merger_gui.py --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 jwl_backup_merger.py jwl_backup_merger_gui.py --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
 
     - name: Check format with black
       run: |
-        black --check jwl_backup_merger.py || true
+        black --check jwl_backup_merger.py jwl_backup_merger_gui.py || true
 
   test:
     runs-on: ${{ matrix.os }}
@@ -60,13 +60,13 @@ jobs:
 
     - name: Run syntax check
       run: |
-        python -m py_compile jwl_backup_merger.py
+        python -m py_compile jwl_backup_merger.py jwl_backup_merger_gui.py
 
     - name: Test --help
       run: |
         python jwl_backup_merger.py --help
 
-  build-linux:
+  build-cli-linux:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -81,19 +81,46 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-    - name: Build Linux binary
+    - name: Build CLI binary
       run: |
         pyinstaller jwl_backup_merger.spec --clean
-        cp dist/jwl-backup-merger jwl-backup-merger-linux
-        chmod +x jwl-backup-merger-linux
+        cp dist/jwl-backup-merger jwl-backup-merger-cli-linux
+        chmod +x jwl-backup-merger-cli-linux
 
-    - name: Upload Linux binary
+    - name: Upload CLI binary
       uses: actions/upload-artifact@v4
       with:
-        name: jwl-backup-merger-linux
-        path: jwl-backup-merger-linux
+        name: jwl-backup-merger-cli-linux
+        path: jwl-backup-merger-cli-linux
 
-  build-windows:
+  build-gui-linux:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Build GUI binary
+      run: |
+        pyinstaller jwl_backup_merger_gui.spec --clean
+        cp dist/JWLibraryMerger jwl-backup-merger-gui-linux
+        chmod +x jwl-backup-merger-gui-linux
+
+    - name: Upload GUI binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: jwl-backup-merger-gui-linux
+        path: jwl-backup-merger-gui-linux
+
+  build-cli-windows:
     runs-on: windows-latest
     steps:
     - uses: actions/checkout@v4
@@ -108,18 +135,44 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-    - name: Build Windows binary
+    - name: Build CLI binary
       run: |
         pyinstaller jwl_backup_merger.spec --clean
       shell: bash
 
-    - name: Upload Windows binary
+    - name: Upload CLI binary
       uses: actions/upload-artifact@v4
       with:
-        name: jwl-backup-merger-windows
+        name: jwl-backup-merger-cli-windows
         path: dist/jwl-backup-merger.exe
 
-  build-macos:
+  build-gui-windows:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Build GUI binary
+      run: |
+        pyinstaller jwl_backup_merger_gui.spec --clean
+      shell: bash
+
+    - name: Upload GUI binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: jwl-backup-merger-gui-windows
+        path: dist/JWLibraryMerger.exe
+
+  build-cli-macos:
     runs-on: macos-latest
     steps:
     - uses: actions/checkout@v4
@@ -134,43 +187,66 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-    - name: Build macOS binary
+    - name: Build CLI binary
       run: |
         pyinstaller jwl_backup_merger.spec --clean
-        cp dist/jwl-backup-merger jwl-backup-merger-macos
-        chmod +x jwl-backup-merger-macos
+        cp dist/jwl-backup-merger jwl-backup-merger-cli-macos
+        chmod +x jwl-backup-merger-cli-macos
 
-    - name: Upload macOS binary
+    - name: Upload CLI binary
       uses: actions/upload-artifact@v4
       with:
-        name: jwl-backup-merger-macos
-        path: jwl-backup-merger-macos
+        name: jwl-backup-merger-cli-macos
+        path: jwl-backup-merger-cli-macos
+
+  build-gui-macos:
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Build GUI binary
+      run: |
+        pyinstaller jwl_backup_merger_gui.spec --clean
+        cp dist/JWLibraryMerger jwl-backup-merger-gui-macos
+        chmod +x jwl-backup-merger-gui-macos
+
+    - name: Upload GUI binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: jwl-backup-merger-gui-macos
+        path: jwl-backup-merger-gui-macos
 
   publish-release:
-    needs: [build-linux, build-windows, build-macos]
+    needs: [build-cli-linux, build-gui-linux, build-cli-windows, build-gui-windows, build-cli-macos, build-gui-macos]
     runs-on: ubuntu-latest
     if: github.event_name == 'release'
 
     steps:
     - uses: actions/checkout@v4
 
-    - name: Download Linux binary
+    - name: Download CLI binaries
       uses: actions/download-artifact@v4
       with:
-        name: jwl-backup-merger-linux
+        pattern: jwl-backup-merger-cli-*
         path: ./
+        merge-multiple: true
 
-    - name: Download Windows binary
+    - name: Download GUI binaries
       uses: actions/download-artifact@v4
       with:
-        name: jwl-backup-merger-windows
+        pattern: jwl-backup-merger-gui-*
         path: ./
-
-    - name: Download macOS binary
-      uses: actions/download-artifact@v4
-      with:
-        name: jwl-backup-merger-macos
-        path: ./
+        merge-multiple: true
 
     - name: List files
       run: ls -la
@@ -179,9 +255,12 @@ jobs:
       uses: softprops/action-gh-release@v1
       with:
         files: |
-          jwl-backup-merger-linux
-          jwl-backup-merger-windows.exe
-          jwl-backup-merger-macos
+          jwl-backup-merger-cli-linux
+          jwl-backup-merger-cli-windows.exe
+          jwl-backup-merger-cli-macos
+          jwl-backup-merger-gui-linux
+          jwl-backup-merger-gui-windows.exe
+          jwl-backup-merger-gui-macos
         generate_release_notes: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
