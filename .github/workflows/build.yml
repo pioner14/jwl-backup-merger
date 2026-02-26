@@ -3,10 +3,10 @@ name: Build & Test
 on:
   push:
     branches: [ "main" ]
+    tags:
+      - 'v*'
   pull_request:
     branches: [ "main" ]
-  release:
-    types: [created]
 
 jobs:
   lint:
@@ -229,7 +229,7 @@ jobs:
   publish-release:
     needs: [build-cli-linux, build-gui-linux, build-cli-windows, build-gui-windows, build-cli-macos, build-gui-macos]
     runs-on: ubuntu-latest
-    if: github.event_name == 'release'
+    if: startsWith(github.ref, 'refs/tags/v')
 
     steps:
     - uses: actions/checkout@v4
