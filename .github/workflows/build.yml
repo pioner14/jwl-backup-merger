@@ -251,7 +251,7 @@ jobs:
     - name: List files
       run: ls -la
 
-    - name: Upload Release Assets
+    - name: Create Release and Upload Assets
       uses: softprops/action-gh-release@v1
       with:
         files: |
@@ -262,5 +262,6 @@ jobs:
           jwl-backup-merger-gui-windows.exe
           jwl-backup-merger-gui-macos
         generate_release_notes: true
+        make_latest: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
